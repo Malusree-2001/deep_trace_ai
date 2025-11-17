@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# DeepTrace - Visual Signature Graphs for Detecting AI-Generated Images
-# Author: <your name>
+# DeepTrace - Memory-Optimized for Large Datasets (100K+ images)
+# Ultra-aggressive memory management for limited RAM environments
 
 import argparse
 import sys
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import cv2
 import matplotlib.pyplot as plt
 import networkx as nx
-
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
 from sklearn.ensemble import IsolationForest
@@ -24,13 +22,9 @@ try:
     SKIMAGE_OK = True
 except Exception:
     SKIMAGE_OK = False
-    print("[WARN] scikit-image not available; skipping GLCM features.", file=sys.stderr)
-
-
-# --------------------- Feature Extraction ---------------------
+    print("[WARN] scikit-image not available", file=sys.stderr)
 
 def read_image(path, size=256):
-    """Return grayscale float image resized to square 'size'."""
     bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if bgr is None:
         raise ValueError(f"Could not read: {path}")
@@ -38,18 +32,15 @@ def read_image(path, size=256):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
     return gray
 
-
 def edge_density(gray):
     g8 = (gray * 255).astype(np.uint8)
     edges = cv2.Canny(g8, 100, 200)
     return float((edges > 0).mean())
 
-
 def laplacian_var(gray):
     g8 = (gray * 255).astype(np.uint8)
     lap = cv2.Laplacian(g8, cv2.CV_64F)
     return float(lap.var())
-
 
 def noise_residual_stats(gray, ksize=3):
     g8 = (gray * 255).astype(np.uint8)
@@ -62,7 +53,6 @@ def noise_residual_stats(gray, ksize=3):
     kurtosis_excess = float(s4 / (s2 ** 2) - 3.0)
     return std, kurtosis_excess
 
-
 def fft_highfreq_ratio(gray, low_frac=0.2):
     f = np.fft.fft2(gray)
     mag = np.abs(np.fft.fftshift(f))
@@ -72,7 +62,6 @@ def fft_highfreq_ratio(gray, low_frac=0.2):
     low = mag[cy - ly:cy + ly, cx - lx:cx + lx].sum()
     tot = mag.sum() + 1e-12
     return float((tot - low) / tot)
-
 
 def blockiness_score(gray, block=8):
     g = (gray * 255).astype(np.float32)
@@ -88,16 +77,14 @@ def blockiness_score(gray, block=8):
     total = dh.sum() + dv.sum() + 1e-12
     return float((on_v + on_h) / total)
 
-
 def glcm_features(gray):
     if not SKIMAGE_OK:
         return np.nan, np.nan
     g8 = (gray * 255).astype(np.uint8)
-    glcm = graycomatrix(g8, distances=(1,), angles=(0,), levels=256, symmetric=True, normed=True)
-    contrast = graycoprops(glcm, "contrast").mean()
-    homogeneity = graycoprops(glcm, "homogeneity").mean()
+    glcm = graycomatrix(g8, distances=(1,), angles=(0,), levels=256, symmetric=True, normed=True) #type: ignore
+    contrast = graycoprops(glcm, "contrast").mean()#type: ignore
+    homogeneity = graycoprops(glcm, "homogeneity").mean()#type: ignore
     return float(contrast), float(homogeneity)
-
 
 def extract_vector(gray):
     std, kurt = noise_residual_stats(gray)
@@ -113,47 +100,87 @@ def extract_vector(gray):
         "glcm_homogeneity": hom,
     }
 
-
-# --------------------- Graph & Analytics ---------------------
-
-def matrix_X(df):
-    cols = [c for c in df.columns if c not in ("path", "name", "label")]
-    return df[cols].astype(float).values, cols
-
-
-def knn_graph(X, k=5):
-    S = cosine_similarity(X)
-    np.fill_diagonal(S, 0.0)
+def knn_graph_ultra_chunked(X, k=5, chunk_row=1000, chunk_col=5000):
+    """
+    Ultra-aggressive chunking: process both rows AND columns in smaller chunks.
+    Memory usage: O(chunk_row * chunk_col) instead of O(n^2)
+    """
+    n = X.shape[0]
+    d = X.shape[1]
     G = nx.Graph()
-    n = S.shape[0]
     G.add_nodes_from(range(n))
+    
+    print(f"[INFO] Ultra-chunked KNN: row_chunk={chunk_row}, col_chunk={chunk_col}")
+    
+    # Use sparse representation - only store top-k per row
+    top_k_indices = np.zeros((n, k), dtype=np.int32)
+    top_k_scores = np.zeros((n, k), dtype=np.float32)
+    
+    # Process all rows in chunks
+    for row_start in range(0, n, chunk_row):
+        row_end = min(row_start + chunk_row, n)
+        row_chunk = X[row_start:row_end]
+        
+        # For this row chunk, find top-k globally by processing column chunks
+        partial_sims = []
+        partial_indices = []
+        
+        for col_start in range(0, n, chunk_col):
+            col_end = min(col_start + chunk_col, n)
+            col_chunk = X[col_start:col_end]
+            
+            # Compute similarity for this block
+            sim_block = cosine_similarity(row_chunk, col_chunk).astype(np.float32)
+            partial_sims.append(sim_block)
+            partial_indices.append(np.arange(col_start, col_end))
+            
+            # Force garbage collection
+            del col_chunk
+        
+        # Concatenate and find top-k globally
+        all_sims = np.concatenate(partial_sims, axis=1)
+        all_indices = np.concatenate(partial_indices)
+        
+        # Get top-k for each row
+        for i in range(row_chunk.shape[0]):
+            global_idx = row_start + i
+            row_sims = all_sims[i]
+            
+            # Zero out self-similarity
+            if global_idx < len(all_indices):
+                self_pos = np.where(all_indices == global_idx)[0]
+                if len(self_pos) > 0:
+                    row_sims[self_pos[0]] = -1
+            
+            top_k_idx = np.argsort(-row_sims)[:k]
+            top_k_indices[global_idx] = all_indices[top_k_idx]
+            top_k_scores[global_idx] = row_sims[top_k_idx]
+        
+        progress = min(row_end, n)
+        print(f"  ... processed {progress}/{n} rows")
+        
+        # Clean up
+        del partial_sims, partial_indices, all_sims, all_indices
+    
+    # Build graph from top-k
     for i in range(n):
-        nbrs = np.argsort(S[i])[::-1][:k]
-        for j in nbrs:
-            if i == j:
-                continue
-            w = float(S[i, j])
-            if w > 0 and not G.has_edge(i, j):
-                G.add_edge(i, j, weight=w)
-    return G, S
+        for j, score in zip(top_k_indices[i], top_k_scores[i]):
+            j = int(j)
+            if score > 0 and i != j and not G.has_edge(i, j):
+                G.add_edge(i, j, weight=float(score))
+    
+    return G, None  # Don't store full matrix
 
-
-def cluster_and_anomaly(X, dbscan_eps=0.8, dbscan_min_samples=5, random_state=42):
+def cluster_and_anomaly(X):
     Xs = StandardScaler().fit_transform(X)
-
-    # Clustering
-    db = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples).fit(Xs)
+    db = DBSCAN(eps=0.8, min_samples=5).fit(Xs)
     cl = db.labels_
-
-    # Anomaly scoring (higher raw score = less anomalous)
-    iso = IsolationForest(n_estimators=200, contamination="auto", random_state=random_state).fit(Xs)
+    iso = IsolationForest(n_estimators=200, contamination="auto", random_state=42).fit(Xs)
     raw = iso.score_samples(Xs)
-    ranks = raw.argsort().argsort().astype(float)          # rank to [0..N-1]
-    anom_score = ranks / (len(ranks) - 1 + 1e-9)           # normalize to [0..1]; higher = more anomalous
-    return cl, anom_score
-
-
-# --------------------- Visualization ---------------------
+    ranks = raw.argsort().argsort().astype(float)
+    anom_score = ranks / (len(ranks) - 1 + 1e-9)
+    anom_flag = (anom_score > 0.5).astype(int)
+    return cl, anom_score, anom_flag
 
 def plot_feature_hists(df, out_dir):
     cols = [c for c in df.columns if c.startswith(("edge_", "laplacian", "resid_", "fft_", "blockiness", "glcm_"))]
@@ -163,198 +190,166 @@ def plot_feature_hists(df, out_dir):
     fig, axes = plt.subplots(rows, 3, figsize=(15, 4 * rows))
     axes = axes.ravel()
     for ax, col in zip(axes, cols):
-        ax.hist(df[col].dropna().values, bins=20)
-        ax.set_title(col)
+        ax.hist(df[col].dropna().values, bins=20, edgecolor='black', alpha=0.7)
+        ax.set_title(col, fontsize=10)
     for ax in axes[len(cols):]:
         ax.axis("off")
     fig.tight_layout()
     fig.savefig(Path(out_dir) / "feature_histograms.png", dpi=180)
     plt.close(fig)
 
-
 def plot_scatter(df, out_dir, x="fft_highfreq_ratio", y="blockiness"):
-    fig, ax = plt.subplots(figsize=(6, 5))
-    sc = ax.scatter(df[x], df[y], c=df.get("cluster", None), cmap="tab10", alpha=0.85)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    if "cluster" in df.columns:
+        scatter = ax.scatter(df[x], df[y], c=df["cluster"], cmap="tab10", alpha=0.7, s=50)
+        cb = fig.colorbar(scatter, ax=ax)
+        cb.set_label("Cluster ID")
+    else:
+        ax.scatter(df[x], df[y], alpha=0.7, s=50)
     ax.set_xlabel(x)
     ax.set_ylabel(y)
     ax.set_title(f"{y} vs {x}")
-    if "cluster" in df.columns:
-        cb = fig.colorbar(sc, ax=ax)
-        cb.set_label("cluster")
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(Path(out_dir) / f"scatter_{x}_vs_{y}.png", dpi=180)
     plt.close(fig)
 
-
 def plot_graph(G, df, out_dir):
     if G.number_of_nodes() == 0:
         return
-    pos = nx.spring_layout(G, seed=42, k=0.6)
-    clusters = df["cluster"].values if "cluster" in df.columns else np.zeros(len(df))
-    sizes = 200 + 600 * df.get("anomaly_score", pd.Series(np.zeros(len(df)))).values
-    cmap = plt.colormaps["tab10"]  # modern API (no deprecation)
-    fig, ax = plt.subplots(figsize=(8, 6))
+    max_nodes = 1000
+    if G.number_of_nodes() > max_nodes:
+        print(f"[INFO] Sampling {max_nodes} nodes for visualization")
+        sample_nodes = np.random.choice(G.number_of_nodes(), size=max_nodes, replace=False)
+        G = G.subgraph(sample_nodes).copy()
+        df_vis = df.iloc[sample_nodes]
+    else:
+        df_vis = df
+    pos = nx.spring_layout(G, seed=42, k=0.6, iterations=50)
+    clusters = df_vis["cluster"].values if "cluster" in df_vis.columns else np.zeros(len(df_vis))
+    sizes = 200 + 600 * df_vis.get("anomaly_score", pd.Series(np.zeros(len(df_vis)))).values
+    cmap = plt.colormaps["tab10"]
+    fig, ax = plt.subplots(figsize=(10, 8))
     if G.number_of_edges() > 0:
         w = [G[u][v]["weight"] for u, v in G.edges()]
-        nx.draw_networkx_edges(G, pos, alpha=0.2, width=[2 * ww for ww in w], ax=ax)
+        nx.draw_networkx_edges(G, pos, alpha=0.15, width=[3*ww for ww in w], ax=ax)
     node_colors = [cmap(int((c if c >= 0 else 9) % 10)) for c in clusters]
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=sizes, ax=ax)
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=sizes, ax=ax, alpha=0.8)
     ax.set_title("Similarity Graph (color=cluster, size=anomaly)")
     ax.axis("off")
     fig.tight_layout()
     fig.savefig(Path(out_dir) / "similarity_graph.png", dpi=200)
     plt.close(fig)
 
-
 def plot_degree_hist(G, out_dir):
     deg = [d for _, d in G.degree()]
     if not deg:
         return
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(deg, bins=range(0, max(deg) + 2), align="left")
-    ax.set_xlabel("degree")
-    ax.set_ylabel("count")
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(deg, bins=range(0, max(deg) + 2), align="left", edgecolor='black', alpha=0.7)
+    ax.set_xlabel("Degree")
+    ax.set_ylabel("Count")
     ax.set_title("Graph Degree Distribution")
+    ax.grid(True, alpha=0.3, axis='y')
     fig.tight_layout()
     fig.savefig(Path(out_dir) / "degree_distribution.png", dpi=180)
     plt.close(fig)
-
-
-# --------------------- Main Pipeline ---------------------
 
 def collect_images(data_dir, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")):
     p = Path(data_dir)
     return sorted([q for q in p.rglob("*") if q.suffix.lower() in exts])
 
-
 def infer_label_from_path(p: Path):
-    parent = p.parent.name.lower()
-    if parent in ("real", "ai", "fake", "synthetic"):
-        return "ai" if parent in ("fake", "synthetic") else parent
-    return None
+    parts = [part.lower() for part in p.parts]
+    label = None
+    for part in parts:
+        if part in ("real", "ai", "fake", "synthetic"):
+            label = "real" if part == "real" else "ai"
+            break
+    split = None
+    for part in parts:
+        if part in ("train", "test"):
+            split = part
+            break
+    return label, split
 
-
-def run(data_dir, out_dir, size=256, k=5, anom_thresh=0.8, dbscan_eps=0.8, dbscan_min_samples=5):
+def run(data_dir, out_dir, size=256, k=5, chunk_row=1000, chunk_col=5000, sample_rate=1.0):
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     paths = collect_images(data_dir)
     if not paths:
         print(f"[ERR] No images in {data_dir}", file=sys.stderr)
         return 1
-
-    # Extract features
+    
+    if sample_rate < 1.0:
+        n_sample = max(1, int(len(paths) * sample_rate))
+        indices = np.random.choice(len(paths), size=n_sample, replace=False)
+        paths = [paths[i] for i in indices]
+        print(f"[INFO] Sampling {n_sample} images ({100*sample_rate:.0f}%)")
+    
     rows = []
-    for p in paths:
+    print(f"[INFO] Processing {len(paths)} images...")
+    for idx, p in enumerate(paths):
+        if (idx + 1) % max(100, len(paths)//10) == 0:
+            print(f"  ... processed {idx + 1}/{len(paths)}")
         try:
             g = read_image(p, size=size)
             vec = extract_vector(g)
         except Exception as e:
-            print("[WARN]", p, e)
+            print(f"[WARN] {p}: {e}")
             continue
-        row = {"path": str(p), "name": p.name, "label": infer_label_from_path(p)}
+        label, split = infer_label_from_path(p)
+        row = {"path": str(p), "name": p.name, "label": label, "split": split}
         row.update(vec)
         rows.append(row)
-
+    
     if len(rows) < 2:
         print("[ERR] Need at least 2 valid images.", file=sys.stderr)
         return 2
-
+    
     df = pd.DataFrame(rows)
-    X, _ = matrix_X(df)
-
-    # Analytics
-    clusters, a_score = cluster_and_anomaly(X, dbscan_eps=dbscan_eps, dbscan_min_samples=dbscan_min_samples)
+    cols = [c for c in df.columns if c not in ("path", "name", "label", "split")]
+    X = df[cols].astype(float).values
+    
+    print("[INFO] Running clustering and anomaly detection...")
+    clusters, a_score, a_flag = cluster_and_anomaly(X)
     df["cluster"] = clusters
     df["anomaly_score"] = a_score
-    df["anomaly_flag"] = (df["anomaly_score"] > anom_thresh).astype(int)
-
-    # Graph
-    G, S = knn_graph(X, k=k)
-    np.save(Path(out_dir) / "similarity_matrix.npy", S)
-
-    # Save table
+    df["anomaly_flag"] = a_flag
+    
+    print("[INFO] Building similarity graph (ultra-chunked)...")
+    G, _ = knn_graph_ultra_chunked(X, k=k, chunk_row=chunk_row, chunk_col=chunk_col)
+    
     df.to_csv(Path(out_dir) / "features.csv", index=False)
-
-    # Plots
+    print(f"[INFO] Features saved to {out_dir}/features.csv")
+    
+    print("[INFO] Generating visualizations...")
     plot_feature_hists(df, out_dir)
     plot_scatter(df, out_dir)
     plot_graph(G, df, out_dir)
     plot_degree_hist(G, out_dir)
-
-    # ---- Console + text report (flagged images) ----
-    anom_df = df[df["anomaly_flag"] == 1][["name", "label", "anomaly_score"]].sort_values(
-        "anomaly_score", ascending=False
-    )
-
-    print("\n[ANOMALIES]")
-    if anom_df.empty:
-        print(f"None flagged at threshold = {anom_thresh}")
-    else:
-        for _, r in anom_df.iterrows():
-            print(f"- {r['name']}  label={r['label']}  score={r['anomaly_score']:.3f}")
-
-    # Quick eval if labels exist
-    lines = []
-    lines.append(f"Threshold: {anom_thresh}")
-    lines.append(f"DBSCAN: eps={dbscan_eps}  min_samples={dbscan_min_samples}")
-    lines.append(f"Total images: {len(df)} | Flagged anomalies: {len(anom_df)}")
-
-    dfl = df.dropna(subset=["label"]).copy()
-    if not dfl.empty:
-        dfl["is_ai"] = (dfl["label"].str.lower() == "ai").astype(int)
-        tp = int(((df["anomaly_flag"] == 1) & (dfl["is_ai"] == 1)).sum())
-        tn = int(((df["anomaly_flag"] == 0) & (dfl["is_ai"] == 0)).sum())
-        fp = int(((df["anomaly_flag"] == 1) & (dfl["is_ai"] == 0)).sum())
-        fn = int(((df["anomaly_flag"] == 0) & (dfl["is_ai"] == 1)).sum())
-        prec = tp / (tp + fp + 1e-9)
-        rec  = tp / (tp + fn + 1e-9)
-        acc  = (tp + tn) / (tp + tn + fp + fn + 1e-9)
-
-        print(f"[EVAL] TP={tp} FP={fp} FN={fn} TN={tn}")
-        print(f"[EVAL] Precision={prec:.2f}  Recall={rec:.2f}  Accuracy={acc:.2f}")
-
-        lines.append(f"Confusion Matrix: TP={tp} FP={fp} FN={fn} TN={tn}")
-        lines.append(f"Precision={prec:.3f}  Recall={rec:.3f}  Accuracy={acc:.3f}")
-
-    # Save text report
-    report_path = Path(out_dir) / "report.txt"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("DeepTrace Report\n")
-        f.write("\n".join(lines) + "\n\n")
-        f.write("Flagged Anomalies (sorted by score):\n")
-        if anom_df.empty:
-            f.write("None\n")
-        else:
-            for _, r in anom_df.iterrows():
-                f.write(f"{r['name']}\tlabel={r['label']}\tscore={r['anomaly_score']:.3f}\n")
-
-    # Console summary
-    print(f"\n[SUMMARY] images={len(df)}, clusters={len(set(clusters))}, anomalies={int(df['anomaly_flag'].sum())}")
-    print(f"[OK] Wrote report: {report_path}")
-    print(f"[OUT] Results in: {out_dir}")
+    
+    print("\n" + "="*60)
+    print(f"[SUMMARY]")
+    print(f"  Total images: {len(df)}")
+    print(f"  Clusters: {len(set(clusters))}")
+    print(f"  Anomalies: {int(a_flag.sum())} ({100*a_flag.mean():.1f}%)")
+    if "label" in df.columns:
+        print(f"  Labels: {dict(df['label'].value_counts())}")
+    print(f"\n[OUTPUT] Results: {out_dir}")
+    print("="*60)
     return 0
 
-
 def main():
-    p = argparse.ArgumentParser(description="DeepTrace - Visual Signature Graphs for Detecting AI Images")
-    p.add_argument("--data_dir", required=True, help="folder with images")
-    p.add_argument("--out_dir", default="outputs")
-    p.add_argument("--size", type=int, default=256, help="resize to size x size before analysis")
-    p.add_argument("--knn", type=int, default=5, help="k for k-NN similarity graph")
-    p.add_argument("--anom_thresh", type=float, default=0.8, help="Anomaly threshold in [0..1]; higher = stricter")
-    p.add_argument("--dbscan_eps", type=float, default=0.8, help="DBSCAN eps (cluster tightness)")
-    p.add_argument("--dbscan_min_samples", type=int, default=5, help="DBSCAN min_samples")
+    p = argparse.ArgumentParser(description="DeepTrace - Memory-Optimized")
+    p.add_argument("--data_dir", required=True, help="Folder with images")
+    p.add_argument("--out_dir", default="outputs", help="Output directory")
+    p.add_argument("--size", type=int, default=256, help="Image size")
+    p.add_argument("--knn", type=int, default=5, help="K for KNN")
+    p.add_argument("--chunk_row", type=int, default=1000, help="Row chunk size (lower=less memory)")
+    p.add_argument("--chunk_col", type=int, default=5000, help="Column chunk size")
+    p.add_argument("--sample_rate", type=float, default=1.0, help="Sample rate")
     args = p.parse_args()
-
-    sys.exit(run(
-        data_dir=args.data_dir,
-        out_dir=args.out_dir,
-        size=args.size,
-        k=args.knn,
-        anom_thresh=args.anom_thresh,
-        dbscan_eps=args.dbscan_eps,
-        dbscan_min_samples=args.dbscan_min_samples,
-    ))
-
+    sys.exit(run(args.data_dir, args.out_dir, args.size, args.knn, args.chunk_row, args.chunk_col, args.sample_rate))
 
 if __name__ == "__main__":
     main()

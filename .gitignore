@@ -14,3 +14,9 @@ outputs/
 # Ignore IDE/editor settings
 .vscode/
 *.log
+
+# Line endings
+* text=auto
+*.py text eol=lf
+*.tex text eol=lf
+*.md text eol=lf
