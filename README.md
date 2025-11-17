@@ -244,7 +244,7 @@ Reduction = 40GB → 200MB = 200× improvement ✅
 ## 📝 Paper & Documentation
 
 ### IEEE Conference Paper
-- File: `DeepTrace_IEEE_Final.tex`
+- File: `DeepTrace_IEEE.tex`
 - Format: pdf
 - Length: 3 pages
 - Contains: All results, tables, equations
