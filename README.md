@@ -329,7 +329,7 @@ If you use DeepTrace in your research, please cite:
 ```bibtex
 @conference{pradeep2025deeptrace,
   title={DeepTrace: Visual Signature Graphs for AI-Generated Image Detection},
-  author={Pradeep, Avanthika},
+  author={Pradeep, Anagha},
   booktitle={IEEE Conference on Computer Vision and Pattern Recognition},
   year={2025}
 }
