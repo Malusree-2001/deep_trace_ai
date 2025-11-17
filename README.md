@@ -341,10 +341,10 @@ MIT License - Feel free to use for research and commercial projects.
 
 ## 👤 Author
 
-**Avanthika Pradeep**
-- SRM University, India
+**Anagha Pradeep**
+- Indiana University, Indianapolis
 - Interest: Geospatial analysis, Machine Learning, AI-generated content detection
-- Email: avanthika@example.com
+- Email: anaprad@iu.edu
 
 ## 🎉 Results Summary
 
